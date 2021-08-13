@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -137,6 +138,9 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+	// real election timeout time.
+	// random between et and 2*et
+	realElectionTimeout int
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -187,6 +191,11 @@ func newRaft(c *Config) *Raft {
 	return raft
 }
 
+func (r *Raft) resetRealElectionTimeout() {
+	// 随机生成
+	r.realElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
@@ -202,13 +211,24 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	if r.isLeader() {
+		r.tickHeartbeat()
+	} else {
+		r.tickElection()
+	}
+}
+
+func (r *Raft) tickHeartbeat() {
 	r.heartbeatElapsed += 1
-	r.electionElapsed += 1
-	if r.isLeader() && r.heartbeatElapsed == r.heartbeatTimeout {
+	if r.heartbeatElapsed == r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
 		r.bcastHeartbeat()
 	}
-	if !r.isLeader() && r.electionElapsed == r.electionTimeout {
+}
+
+func (r *Raft) tickElection() {
+	r.electionElapsed += 1
+	if r.electionElapsed == r.realElectionTimeout {
 		r.electionElapsed = 0
 		r.campaign()
 	}
@@ -223,6 +243,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.votes = nil
 	r.voteCount = 0
 	r.denialCount = 0
+	r.resetTick()
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -265,6 +286,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.campaign()
 		case pb.MessageType_MsgRequestVote:
 			r.handleVoteRequest(m)
+		case pb.MessageType_MsgAppend:
+			r.handleAppendEntries(m)
 		}
 	case StateCandidate:
 		switch m.MsgType {
@@ -274,6 +297,8 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleVoteResponse(m)
 		case pb.MessageType_MsgRequestVote:
 			r.handleVoteRequest(m)
+		case pb.MessageType_MsgAppend:
+			r.handleAppendEntries(m)
 		}
 	case StateLeader:
 		switch m.MsgType {
@@ -282,6 +307,10 @@ func (r *Raft) Step(m pb.Message) error {
 			r.bcastAppend(m.Entries...)
 		case pb.MessageType_MsgRequestVote:
 			r.handleVoteRequest(m)
+		case pb.MessageType_MsgAppend:
+			r.becomeFollower(m.Term, m.From)
+		case pb.MessageType_MsgBeat:
+			r.bcastHeartbeat()
 		}
 	}
 	return nil
@@ -296,6 +325,9 @@ func (r *Raft) campaign() {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	if m.Term >= r.Term {
+		r.becomeFollower(m.Term, m.From)
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -310,7 +342,8 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 // handleVoteRequest handle vote request
 func (r *Raft) handleVoteRequest(m pb.Message) {
-	if r.Term > m.Term {
+	lastTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+	if r.Term > m.Term || r.isMoreUpToDateThan(m.LogTerm, m.Index) {
 		r.sendVoteResponse(m.From, true)
 		return
 	}
@@ -324,11 +357,21 @@ func (r *Raft) handleVoteRequest(m pb.Message) {
 		r.sendVoteResponse(m.From, false)
 		return
 	}
-	if r.isFollower() && r.Vote == None {
+	if r.isFollower() &&
+		r.Vote == None &&
+		(lastTerm < m.LogTerm || (lastTerm == m.LogTerm && m.Index >= r.RaftLog.LastIndex())) {
 		r.sendVoteResponse(m.From, false)
 		return
 	}
 	r.sendVoteResponse(m.From, true)
+}
+
+func (r *Raft) isMoreUpToDateThan(term, index uint64) bool {
+	lastTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+	if lastTerm > term || (lastTerm == term && r.RaftLog.LastIndex() > index) {
+		return true
+	}
+	return false
 }
 
 // addNode add a new node to raft group
@@ -345,6 +388,7 @@ func (r *Raft) removeNode(id uint64) {
 func (r *Raft) resetTick() {
 	r.heartbeatElapsed = 0
 	r.electionElapsed = 0
+	r.resetRealElectionTimeout()
 }
 
 // appendEntries append entry to raft log entries
