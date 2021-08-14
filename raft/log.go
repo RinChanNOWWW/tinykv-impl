@@ -101,13 +101,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 }
 
 // appendEntries append entry to entries
-func (l *RaftLog) appendEntries(entries ...*pb.Entry) {
-	for _, e := range entries {
-		l.entries = append(l.entries, pb.Entry{
-			EntryType: e.EntryType,
-			Term:      e.Term,
-			Index:     e.Index,
-			Data:      e.Data,
-		})
-	}
+func (l *RaftLog) appendEntries(entries ...pb.Entry) {
+	l.entries = append(l.entries, entries...)
+	l.storage.Append(entries)
 }
