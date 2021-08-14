@@ -75,13 +75,15 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	res, _ := l.storage.Entries(l.committed+1, l.LastIndex()+1)
+	return res
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	res, _ := l.storage.Entries(l.applied+1, l.LastIndex()+1)
+	return res
 }
 
 // LastIndex return the last index of the log entries

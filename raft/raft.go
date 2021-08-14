@@ -200,12 +200,16 @@ func (r *Raft) resetRealElectionTimeout() {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	lastIndex := r.Prs[to].Next - 1
-	lastIndexTerm, err := r.RaftLog.Term(lastIndex)
+	lastIndex := r.RaftLog.LastIndex()
+	preLogIndex := r.Prs[to].Next - 1
+	if lastIndex < preLogIndex {
+		return true
+	}
+	preLogTerm, err := r.RaftLog.Term(preLogIndex)
 	if err != nil {
 		return false
 	}
-	entries, err := r.RaftLog.storage.Entries(r.Prs[to].Next, r.RaftLog.LastIndex()+1)
+	entries, err := r.RaftLog.storage.Entries(r.Prs[to].Next, lastIndex+1)
 	if err != nil {
 		return false
 	}
@@ -223,8 +227,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		LogTerm: lastIndexTerm,
-		Index:   lastIndex,
+		LogTerm: preLogTerm,
+		Index:   preLogIndex,
 		Entries: sendEntreis,
 		Commit:  r.RaftLog.committed,
 	}
@@ -346,12 +350,15 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgPropose:
 			r.appendEntries(m.Entries...)
 			r.bcastAppend()
+			r.updateCommit()
 		case pb.MessageType_MsgRequestVote:
 			r.handleVoteRequest(m)
 		case pb.MessageType_MsgAppend:
 			r.becomeFollower(m.Term, m.From)
 		case pb.MessageType_MsgBeat:
 			r.bcastHeartbeat()
+		case pb.MessageType_MsgAppendResponse:
+			r.handleAppendResponse(m)
 		}
 	}
 	return nil
@@ -369,6 +376,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
 		r.appendEntries(m.Entries...)
+		// r.sendAppendResponse(m.From, false)
 	}
 }
 
@@ -471,6 +479,18 @@ func (r *Raft) sendVoteResponse(nvote uint64, reject bool) {
 	r.msgs = append(r.msgs, msg)
 }
 
+// sendAppendResponse send append response
+func (r *Raft) sendAppendResponse(to uint64, reject bool) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		Reject:  reject,
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
 // ------------------ candidate methods ------------------
 
 // bcastVoteRequest is used by candidate to send vote request
@@ -529,6 +549,46 @@ func (r *Raft) bcastHeartbeat() {
 	for peer := range r.Prs {
 		if peer != r.id {
 			r.sendHeartbeat(peer)
+		}
+	}
+}
+
+func (r *Raft) handleAppendResponse(m pb.Message) {
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, None)
+		return
+	}
+	if !m.Reject {
+		r.Prs[m.From].Next = m.Index + 1
+		r.Prs[m.From].Match = m.Index
+	} else if r.Prs[m.From].Next > 0 {
+		r.Prs[m.From].Next -= 1
+		r.sendAppend(m.From)
+	}
+	r.updateCommit()
+}
+
+// updateCommit ...
+func (r *Raft) updateCommit() {
+	minMatch := r.RaftLog.LastIndex()
+	for peer, p := range r.Prs {
+		if peer == r.id {
+			continue
+		}
+		minMatch = min(minMatch, p.Match)
+	}
+	if minMatch < r.RaftLog.committed {
+		return
+	}
+	for i := minMatch; i <= r.RaftLog.LastIndex(); i += 1 {
+		matchCnt := 0
+		for _, p := range r.Prs {
+			if p.Match >= i {
+				matchCnt += 1
+			}
+		}
+		if matchCnt+1 > len(r.Prs)/2 {
+			r.RaftLog.committed = i
 		}
 	}
 }
