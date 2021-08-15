@@ -50,18 +50,30 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	firstIndex uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
+	lo, _ := storage.FirstIndex()
+	hi, _ := storage.LastIndex()
+	ents := make([]pb.Entry, 0)
+	var err error
+	if lo <= hi {
+		ents, err = storage.Entries(lo, hi+1)
+		if err != nil {
+			panic(err)
+		}
+	}
 	return &RaftLog{
-		storage:   storage,
-		committed: 0,
-		applied:   0,
-		stabled:   0,
-		entries:   make([]pb.Entry, 0),
+		storage:    storage,
+		committed:  0,
+		applied:    0,
+		stabled:    0,
+		entries:    ents,
+		firstIndex: lo,
 	}
 }
 
@@ -75,35 +87,50 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	res, _ := l.storage.Entries(l.committed+1, l.LastIndex()+1)
-	return res
+	if len(l.entries) > 0 {
+		return l.entries[l.applied-l.firstIndex+1:]
+	}
+	return nil
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	res, _ := l.storage.Entries(l.applied+1, l.LastIndex()+1)
-	return res
+	if len(l.entries) > 0 {
+		return l.entries[l.applied-l.firstIndex+1 : l.committed-l.firstIndex+1]
+	}
+	return nil
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	index, err := l.storage.LastIndex()
-	if err != nil {
-		return 0
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].Index
 	}
+	index, _ := l.storage.LastIndex()
 	return index
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if len(l.entries) > 0 && i >= l.firstIndex {
+		return l.entries[i-l.firstIndex].Term, nil
+	}
 	return l.storage.Term(i)
 }
 
 // appendEntries append entry to entries
 func (l *RaftLog) appendEntries(entries ...pb.Entry) {
 	l.entries = append(l.entries, entries...)
-	l.storage.Append(entries)
+}
+
+// Entries returns entries in [lo, hi)
+func (l *RaftLog) Entries(lo, hi uint64) []pb.Entry {
+	if lo >= l.firstIndex && hi-l.firstIndex <= uint64(len(l.entries)) {
+		return l.entries[lo-l.firstIndex : hi-l.firstIndex]
+	}
+	ents, _ := l.storage.Entries(lo, hi)
+	return ents
 }

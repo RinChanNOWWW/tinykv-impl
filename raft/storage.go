@@ -68,8 +68,6 @@ type Storage interface {
 	// so raft state machine could know that Storage needs some time to prepare
 	// snapshot and call Snapshot later.
 	Snapshot() (pb.Snapshot, error)
-	// Append entries to storage
-	Append(entries []pb.Entry) error
 }
 
 // MemoryStorage implements the Storage interface backed by an

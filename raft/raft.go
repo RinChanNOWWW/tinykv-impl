@@ -209,7 +209,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	if err != nil {
 		return false
 	}
-	entries, err := r.RaftLog.storage.Entries(r.Prs[to].Next, lastIndex+1)
+	entries := r.RaftLog.Entries(preLogIndex+1, lastIndex+1)
 	if err != nil {
 		return false
 	}
@@ -314,7 +314,7 @@ func (r *Raft) becomeLeader() {
 	r.appendEntries(&pb.Entry{
 		EntryType: pb.EntryType_EntryNormal,
 		Term:      r.Term,
-		Index:     r.RaftLog.LastIndex(),
+		Index:     r.RaftLog.LastIndex() + 1,
 		Data:      nil,
 	})
 	r.bcastAppend()
