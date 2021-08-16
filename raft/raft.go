@@ -444,7 +444,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 				break
 			}
 			appendStart = i
-			r.RaftLog.stabled = max(ent.Index, r.RaftLog.stabled)
 		}
 		if m.Entries[appendStart].Index > r.RaftLog.LastIndex() {
 			r.appendEntries(m.Entries[appendStart:]...)
