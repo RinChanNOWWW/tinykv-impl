@@ -320,6 +320,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	r.State = StateLeader
+	r.Lead = r.id
 	for _, v := range r.Prs {
 		v.Match = 0
 		v.Next = r.RaftLog.LastIndex() + 1
@@ -333,6 +334,7 @@ func (r *Raft) becomeLeader() {
 		Data:      nil,
 	})
 	r.bcastAppend()
+	r.updateCommit()
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -341,16 +343,16 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
-		r.stepFollower(m)
+		return r.stepFollower(m)
 	case StateCandidate:
-		r.stepCandidate(m)
+		return r.stepCandidate(m)
 	case StateLeader:
-		r.stepLeader(m)
+		return r.stepLeader(m)
 	}
 	return nil
 }
 
-func (r *Raft) stepFollower(m pb.Message) {
+func (r *Raft) stepFollower(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.campaign()
@@ -361,9 +363,10 @@ func (r *Raft) stepFollower(m pb.Message) {
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	}
+	return nil
 }
 
-func (r *Raft) stepCandidate(m pb.Message) {
+func (r *Raft) stepCandidate(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.campaign()
@@ -374,9 +377,10 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	}
+	return nil
 }
 
-func (r *Raft) stepLeader(m pb.Message) {
+func (r *Raft) stepLeader(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgPropose:
 		lastIndex := r.RaftLog.LastIndex()
@@ -404,6 +408,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
 	}
+	return nil
 }
 
 // campaign becomes a candidate and start to request vote
