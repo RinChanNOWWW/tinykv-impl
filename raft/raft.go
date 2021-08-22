@@ -18,6 +18,7 @@ import (
 	"errors"
 	"math/rand"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -171,7 +172,7 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	hardState, _, err := c.Storage.InitialState()
+	hardState, confState, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err)
 	}
@@ -191,6 +192,9 @@ func newRaft(c *Config) *Raft {
 		electionTimeout:  c.ElectionTick,
 	}
 	lastIndex := r.RaftLog.LastIndex()
+	if c.peers == nil {
+		c.peers = confState.Nodes
+	}
 	for _, id := range c.peers {
 		if id == r.id {
 			r.Prs[id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
@@ -198,6 +202,7 @@ func newRaft(c *Config) *Raft {
 			r.Prs[id] = &Progress{Match: 0, Next: lastIndex + 1}
 		}
 	}
+	r.becomeFollower(0, None)
 	return r
 }
 
@@ -283,7 +288,7 @@ func (r *Raft) tickHeartbeat() {
 
 func (r *Raft) tickElection() {
 	r.electionElapsed += 1
-	if r.electionElapsed == r.realElectionTimeout {
+	if r.electionElapsed >= r.realElectionTimeout {
 		r.electionElapsed = 0
 		r.campaign()
 	}
@@ -303,6 +308,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
+	log.Infof("%v become candidate", r.id)
 	// Your Code Here (2A).
 	r.State = StateCandidate
 	r.Term += 1
@@ -318,6 +324,7 @@ func (r *Raft) becomeCandidate() {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
+	log.Infof("%v become leader", r.id)
 	// Your Code Here (2A).
 	r.State = StateLeader
 	r.Lead = r.id
