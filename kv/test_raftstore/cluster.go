@@ -299,7 +299,7 @@ func (c *Cluster) MustPut(key, value []byte) {
 func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 	req := NewPutCfCmd(cf, key, value)
 	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
-	log.Infof("resp: %+v", resp)
+	// log.Infof("resp: %+v", resp)
 	if resp.Header.Error != nil {
 		panic(resp.Header.Error)
 	}
@@ -361,7 +361,7 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 	key := start
 	for (len(end) != 0 && bytes.Compare(key, end) < 0) || (len(key) == 0 && len(end) == 0) {
 		resp, txn := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
-		log.Infof("resp: %+v", resp)
+		// log.Infof("resp: %+v", resp)
 		if resp.Header.Error != nil {
 			panic(resp.Header.Error)
 		}

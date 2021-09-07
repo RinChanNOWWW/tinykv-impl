@@ -333,7 +333,9 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	for _, e := range entries {
 		raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(), e.Index), &e)
 	}
-
+	// update ps raft state
+	ps.raftState.LastIndex = appendLast
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	// call WriteToDB after call this method.
 	return nil
 }
