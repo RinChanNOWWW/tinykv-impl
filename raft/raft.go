@@ -211,63 +211,6 @@ func (r *Raft) resetRealElectionTimeout() {
 	r.realElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
 
-// sendAppend sends an append RPC with new entries (if any) and the
-// current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
-	// Your Code Here (2A).
-	lastIndex := r.RaftLog.LastIndex()
-	preLogIndex := r.Prs[to].Next - 1
-	if lastIndex < preLogIndex {
-		return true
-	}
-	preLogTerm, err := r.RaftLog.Term(preLogIndex)
-	if err != nil {
-		return false
-	}
-	entries := r.RaftLog.Entries(preLogIndex+1, lastIndex+1)
-	if err != nil {
-		return false
-	}
-	sendEntreis := make([]*pb.Entry, 0)
-	for _, en := range entries {
-		sendEntreis = append(sendEntreis, &pb.Entry{
-			EntryType: en.EntryType,
-			Term:      en.Term,
-			Index:     en.Index,
-			Data:      en.Data,
-		})
-	}
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppend,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		LogTerm: preLogTerm,
-		Index:   preLogIndex,
-		Entries: sendEntreis,
-		Commit:  r.RaftLog.committed,
-	}
-	r.msgs = append(r.msgs, msg)
-	return true
-}
-
-// sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
-	// Your Code Here (2A).
-	preLogIndex := r.Prs[to].Next - 1
-	preLogTerm, _ := r.RaftLog.Term(preLogIndex)
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgHeartbeat,
-		To:      to,
-		From:    r.id,
-		Term:    r.Term,
-		LogTerm: preLogTerm,
-		Index:   preLogIndex,
-		Commit:  r.RaftLog.committed,
-	}
-	r.msgs = append(r.msgs, msg)
-}
-
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
@@ -308,7 +251,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
-	log.Infof("%v become candidate", r.id)
+	log.Debugf("%v become candidate", r.id)
 	// Your Code Here (2A).
 	r.State = StateCandidate
 	r.Term += 1
@@ -324,7 +267,7 @@ func (r *Raft) becomeCandidate() {
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
-	log.Infof("%v become leader", r.id)
+	log.Debugf("%v become leader", r.id)
 	// Your Code Here (2A).
 	r.State = StateLeader
 	r.Lead = r.id
@@ -369,6 +312,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -383,6 +328,8 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		r.handleVoteRequest(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -414,6 +361,8 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -499,6 +448,26 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	meta := m.Snapshot.Metadata
+	if meta.Index <= r.RaftLog.committed {
+		r.sendAppendResponse(m.From, false)
+		return
+	}
+	r.becomeFollower(max(r.Term, m.Term), m.From)
+	// clear log
+	r.RaftLog.entries = nil
+	// install snapshot
+	r.RaftLog.firstIndex = meta.Index + 1
+	r.RaftLog.applied = meta.Index
+	r.RaftLog.committed = meta.Index
+	r.RaftLog.stabled = meta.Index
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	// update conf
+	r.Prs = make(map[uint64]*Progress)
+	for _, p := range meta.ConfState.Nodes {
+		r.Prs[p] = &Progress{}
+	}
+	r.sendAppendResponse(m.From, false)
 }
 
 // handleVoteRequest handle vote request
@@ -669,6 +638,67 @@ func (r *Raft) handleVoteResponse(m pb.Message) {
 
 // ------------------- leader methods -------------------
 
+// sendAppend sends an append RPC with new entries (if any) and the
+// current commit index to the given peer. Returns true if a message was sent.
+func (r *Raft) sendAppend(to uint64) bool {
+	// Your Code Here (2A).
+	lastIndex := r.RaftLog.LastIndex()
+	preLogIndex := r.Prs[to].Next - 1
+	if lastIndex < preLogIndex {
+		return true
+	}
+	preLogTerm, err := r.RaftLog.Term(preLogIndex)
+	if err != nil {
+		if err == ErrCompacted {
+			r.sendSnapshot(to)
+			return false
+		}
+		return false
+	}
+	entries := r.RaftLog.Entries(preLogIndex+1, lastIndex+1)
+	if err != nil {
+		return false
+	}
+	sendEntreis := make([]*pb.Entry, 0)
+	for _, en := range entries {
+		sendEntreis = append(sendEntreis, &pb.Entry{
+			EntryType: en.EntryType,
+			Term:      en.Term,
+			Index:     en.Index,
+			Data:      en.Data,
+		})
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: preLogTerm,
+		Index:   preLogIndex,
+		Entries: sendEntreis,
+		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, msg)
+	return true
+}
+
+// sendHeartbeat sends a heartbeat RPC to the given peer.
+func (r *Raft) sendHeartbeat(to uint64) {
+	// Your Code Here (2A).
+	preLogIndex := r.Prs[to].Next - 1
+	preLogTerm, _ := r.RaftLog.Term(preLogIndex)
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: preLogTerm,
+		Index:   preLogIndex,
+		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, msg)
+}
+
 // bcastAppend is used by leader to bcast append request to followers
 func (r *Raft) bcastAppend() {
 	for peer := range r.Prs {
@@ -738,4 +768,19 @@ func (r *Raft) updateCommit() {
 	if commitUpdated {
 		r.bcastAppend()
 	}
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	snap, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snap,
+	})
+	r.Prs[to].Next = snap.Metadata.Index + 1
 }
