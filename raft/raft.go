@@ -246,6 +246,7 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.votes = nil
 	r.voteCount = 0
 	r.denialCount = 0
+	r.leadTransferee = None
 	r.resetTick()
 }
 
@@ -291,6 +292,10 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	// node is not in cluster or has been removed
+	if _, ok := r.Prs[r.id]; !ok {
+		return nil
+	}
 	switch r.State {
 	case StateFollower:
 		return r.stepFollower(m)
@@ -314,6 +319,13 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.campaign()
+	case pb.MessageType_MsgTransferLeader:
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
 	}
 	return nil
 }
@@ -330,6 +342,11 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
 	}
 	return nil
 }
@@ -363,6 +380,8 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.handleHeartbeatResponse(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleLeaderTransfer(m)
 	}
 	return nil
 }
@@ -500,6 +519,7 @@ func (r *Raft) handleVoteRequest(m pb.Message) {
 		r.sendVoteResponse(m.From, false)
 		return
 	}
+	r.resetRealElectionTimeout()
 	r.sendVoteResponse(m.From, true)
 }
 
@@ -514,11 +534,25 @@ func (r *Raft) isMoreUpToDateThan(logTerm, index uint64) bool {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{
+			Match: 0,
+			Next:  1,
+		}
+	}
+	r.PendingConfIndex = None
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		if r.isLeader() {
+			r.updateCommit()
+		}
+	}
+	r.PendingConfIndex = None
 }
 
 // resetTick reset elapsed time to 0
@@ -728,8 +762,12 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	} else if r.Prs[m.From].Next > 0 {
 		r.Prs[m.From].Next -= 1
 		r.sendAppend(m.From)
+		return
 	}
 	r.updateCommit()
+	if m.From == r.leadTransferee && m.Index == r.RaftLog.LastIndex() {
+		r.sendTimeoutNow(m.From)
+	}
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
@@ -783,4 +821,30 @@ func (r *Raft) sendSnapshot(to uint64) {
 		Snapshot: &snap,
 	})
 	r.Prs[to].Next = snap.Metadata.Index + 1
+}
+
+func (r *Raft) handleLeaderTransfer(m pb.Message) {
+	if m.From == r.id {
+		return
+	}
+	if r.leadTransferee == m.From {
+		return
+	}
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	r.leadTransferee = m.From
+	if r.Prs[m.From].Match != r.RaftLog.LastIndex() {
+		r.sendAppend(m.From)
+	} else {
+		r.sendTimeoutNow(m.From)
+	}
+}
+
+func (r *Raft) sendTimeoutNow(to uint64) {
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		To:      to,
+		From:    r.id,
+	})
 }
