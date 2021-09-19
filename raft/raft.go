@@ -195,6 +195,7 @@ func newRaft(c *Config) *Raft {
 	if c.peers == nil {
 		c.peers = confState.Nodes
 	}
+	r.Prs[r.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
 	for _, id := range c.peers {
 		if id == r.id {
 			r.Prs[id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
@@ -288,7 +289,7 @@ func (r *Raft) becomeLeader() {
 	r.updateCommit()
 }
 
-// Step the entrance of handle message, see `MessageType`
+// Step the entrance of  message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
@@ -426,7 +427,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			appendStart = i
 		}
 		if m.Entries[appendStart].Index > r.RaftLog.LastIndex() {
-			r.appendEntries(m.Entries[appendStart:]...)
+			for _, e := range m.Entries[appendStart:] {
+				r.RaftLog.entries = append(r.RaftLog.entries, *e)
+			}
 		}
 	}
 	//  If leaderCommit > commitIndex,
@@ -566,6 +569,12 @@ func (r *Raft) resetTick() {
 func (r *Raft) appendEntries(entries ...*pb.Entry) {
 	ents := make([]pb.Entry, 0)
 	for _, e := range entries {
+		if e.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex != None {
+				continue
+			}
+			r.PendingConfIndex = e.Index
+		}
 		ents = append(ents, pb.Entry{
 			EntryType: e.EntryType,
 			Term:      e.Term,
@@ -719,16 +728,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
-	preLogIndex := r.Prs[to].Next - 1
-	preLogTerm, _ := r.RaftLog.Term(preLogIndex)
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeat,
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		LogTerm: preLogTerm,
-		Index:   preLogIndex,
-		Commit:  r.RaftLog.committed,
 	}
 	r.msgs = append(r.msgs, msg)
 }

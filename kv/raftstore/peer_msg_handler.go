@@ -83,6 +83,16 @@ func (d *peerMsgHandler) HandleRaftReady() {
 }
 
 func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	// if the entry is EntryType_EntryConfChange,
+	// raft_cmdpb.RaftCmdRequest is stored in eraftpb.ConfChange.Context
+	if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+		cc := &eraftpb.ConfChange{}
+		err := cc.Unmarshal(entry.Data)
+		if err != nil {
+			panic(err)
+		}
+		return d.processConfChange(entry, cc, wb)
+	}
 	msg := &raft_cmdpb.RaftCmdRequest{}
 	err := msg.Unmarshal(entry.Data)
 	if err != nil {
@@ -95,6 +105,79 @@ func (d *peerMsgHandler) process(entry eraftpb.Entry, wb *engine_util.WriteBatch
 		return d.processAdminRequest(entry, msg, wb)
 	}
 	return wb
+}
+
+func (d *peerMsgHandler) processConfChange(entry eraftpb.Entry, cc *eraftpb.ConfChange, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
+	msg := &raft_cmdpb.RaftCmdRequest{}
+	if err := msg.Unmarshal(cc.Context); err != nil {
+		panic(err)
+	}
+	region := d.Region()
+	if err, ok := util.CheckRegionEpoch(msg, region, true).(*util.ErrEpochNotMatch); ok {
+		d.handleProposal(entry, func(p *proposal) {
+			p.cb.Done(ErrResp(err))
+		})
+		return wb
+	}
+	peerIndex := regionPeerIndex(region, cc.NodeId)
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		// node is not in cluster
+		if peerIndex == -1 {
+			peer := msg.AdminRequest.ChangePeer.Peer
+			region.Peers = append(region.Peers, peer)
+			region.RegionEpoch.ConfVer += 1
+			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[region.Id] = region
+			storeMeta.Unlock()
+			d.insertPeerCache(peer)
+			log.Infof("%s add peer %d", d.Tag, cc.NodeId)
+		}
+	case eraftpb.ConfChangeType_RemoveNode:
+		if cc.NodeId == d.Meta.Id {
+			d.destroyPeer()
+			return wb
+		}
+		// node is in cluster
+		if peerIndex != -1 {
+			// delete current peer by index
+			region.Peers = append(region.Peers[:peerIndex], region.Peers[peerIndex+1:]...)
+			region.RegionEpoch.ConfVer += 1
+			meta.WriteRegionState(wb, region, rspb.PeerState_Normal)
+			storeMeta := d.ctx.storeMeta
+			storeMeta.Lock()
+			storeMeta.regions[region.Id] = region
+			storeMeta.Unlock()
+			d.removePeerCache(cc.NodeId)
+			log.Infof("%s remove peer %d", d.Tag, cc.NodeId)
+		}
+	}
+	d.RaftGroup.ApplyConfChange(*cc)
+	log.Infof("%s change conf to: %+v", d.Tag, d.RaftGroup.Raft.Prs)
+	d.handleProposal(entry, func(p *proposal) {
+		p.cb.Done(&raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:    raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{},
+			},
+		})
+	})
+	if d.IsLeader() {
+		d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+	}
+	return wb
+}
+
+func regionPeerIndex(region *metapb.Region, id uint64) int {
+	for i, peer := range region.Peers {
+		if peer.Id == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func (d *peerMsgHandler) processAdminRequest(entry eraftpb.Entry, msg *raft_cmdpb.RaftCmdRequest, wb *engine_util.WriteBatch) *engine_util.WriteBatch {
@@ -170,7 +253,7 @@ func (d *peerMsgHandler) processNormalRequest(entry eraftpb.Entry, msg *raft_cmd
 				},
 			}
 		case raft_cmdpb.CmdType_Snap:
-			log.Debugf("%s get snap cf %s-%s", d.Tag)
+			log.Debugf("%s get snap", d.Tag)
 			if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
 				p.cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 				return
@@ -293,6 +376,35 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 			panic(err)
 		}
 		d.RaftGroup.Propose(data)
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.RaftGroup.TransferLeader(req.TransferLeader.Peer.Id)
+		cb.Done(&raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+				TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+			},
+		})
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		// Config changes are only allowed to be proposed
+		// if the leader's applied index is greater than this value.
+		if d.RaftGroup.Raft.PendingConfIndex > d.peerStorage.AppliedIndex() {
+			return
+		}
+		d.proposals = append(d.proposals, &proposal{
+			index: d.nextProposalIndex(),
+			term:  d.Term(),
+			cb:    cb,
+		})
+		ctx, err := msg.Marshal()
+		if err != nil {
+			panic(err)
+		}
+		d.RaftGroup.ProposeConfChange(eraftpb.ConfChange{
+			ChangeType: req.ChangePeer.ChangeType,
+			NodeId:     req.ChangePeer.Peer.Id,
+			Context:    ctx,
+		})
 	}
 }
 
