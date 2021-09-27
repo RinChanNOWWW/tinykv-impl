@@ -1,8 +1,8 @@
 package mvcc
 
 import (
+	"bytes"
 	"encoding/binary"
-	"reflect"
 
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/codec"
@@ -96,7 +96,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	for ; iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
-		if reflect.DeepEqual(key, userKey) {
+		if bytes.Equal(key, userKey) {
 			break
 		}
 	}
@@ -111,7 +111,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if write.Kind == WriteKindDelete {
+	if write.Kind != WriteKindPut {
 		return nil, nil
 	}
 	return txn.Reader.GetCF(engine_util.CfDefault, EncodeKey(key, write.StartTS))
@@ -138,6 +138,21 @@ func (txn *MvccTxn) DeleteValue(key []byte) {
 	txn.writes = append(txn.writes, storage.Modify{Data: delete})
 }
 
+func (txn *MvccTxn) CurrentValue(key []byte) ([]byte, error) {
+	return txn.Reader.GetCF(engine_util.CfDefault, EncodeKey(key, txn.StartTS))
+}
+
+func (txn *MvccTxn) Rollback(key []byte, lock bool) {
+	txn.PutWrite(key, txn.StartTS, &Write{
+		StartTS: txn.StartTS,
+		Kind:    WriteKindRollback,
+	})
+	txn.DeleteValue(key)
+	if lock {
+		txn.DeleteLock(key)
+	}
+}
+
 // CurrentWrite searches for a write with this transaction's start timestamp. It returns a Write from the DB and that
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
@@ -147,7 +162,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	for ; iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
-		if reflect.DeepEqual(key, userKey) {
+		if bytes.Equal(key, userKey) {
 			value, err := item.Value()
 			if err != nil {
 				return nil, 0, err
@@ -173,7 +188,7 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	for ; iter.Valid(); iter.Next() {
 		item := iter.Item()
 		userKey := DecodeUserKey(item.Key())
-		if reflect.DeepEqual(key, userKey) {
+		if bytes.Equal(key, userKey) {
 			value, err := item.Value()
 			if err != nil {
 				return nil, 0, err
